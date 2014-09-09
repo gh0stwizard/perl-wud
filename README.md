@@ -44,3 +44,17 @@ References:
  http://support.microsoft.com/kb/2861188
  http://technet.microsoft.com/en-us/security/Bulletin/MS13-082
 ```
+
+Tips
+====
+
+
+Using wget to download all files
+--------------------------------
+
+
+```
+shell> cd /tmp/winupdates
+shell> find . -type f -exec \
+grep Download {} \; | cut -d" " -f2 | xargs -I'{}' -n1 wget -c -nd {}
+```
