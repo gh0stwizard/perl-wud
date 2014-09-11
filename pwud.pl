@@ -116,6 +116,26 @@ sub process_response {
   $data->{'url_work'} = $work_url;
   
   my $root = HTML::TreeBuilder->new_from_content($body);
+  my $title = $root->look_down
+  (
+    _tag	=> "div",
+    class	=> "product-title",
+  )
+  ->look_down(_tag => "h1");
+  
+  if (not defined $title) {
+    AE::log error => "Failed to find title: %s", $uri->as_iri;
+    $data->{'error'} = "Failed to find title";
+    $PROGRESS{$data->{'url_original'}} = 1;
+    return;
+  }
+  
+  $title = $title->as_text();
+  $title =~ s/^\s+//;
+  $title =~ s/\s+$//;
+  
+  $data->{'title'} = $title;
+  
   my $link_download = $root->look_down
   (
     _tag 	=> "a",
@@ -187,9 +207,14 @@ sub process_response {
     $data->{'date_publish'} = $publish->right->as_text();
     
     $data->{'file_name'} = \my @names;
-    my @name_nodes = $filename->right->content_list;
-    push @names, $_->as_text for @name_nodes;
-
+    my @name_nodes = $filename->right->content_list();
+    
+    for (@name_nodes) {
+      my $name = $_->as_text();
+      $name =~ s/\\/\-/g;
+      push @names, $name;
+    }
+    
     $data->{'file_size'} = \my @sizes;
     my @size_nodes = $filesize->right->content_list;
     push @sizes, $_->as_text for @size_nodes;
@@ -261,7 +286,8 @@ sub store_data($) {
   
     open FILE, ">", $file
       or &AE::log(error => "open %s: %s", $file, $!), return;
-  
+
+    printf FILE "Title: %s\n", $data->{'title'};
     printf FILE "URL: %s\n", $data->{'url_original'};
     printf FILE "File: %s\n", $data->{'file_name'}[$i];
     printf FILE "Size: %s\n", $data->{'file_size'}[$i];
