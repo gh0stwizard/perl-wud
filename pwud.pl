@@ -69,6 +69,8 @@ sub download_all() {
   &import_urls();
   &setup_dns();
   
+  $AnyEvent::HTTP::MAX_RECURSE = 30;
+  
   for (my $i = 0; $i < @URL_LIST; $i++) {
     my $url = $URL_LIST[$i];
     my %data = ( url_original => $url );
@@ -111,21 +113,41 @@ sub process_response {
   my ($body, $hdr, $data) = @_;
   
   my $work_url = $hdr->{'URL'};
+  my $status = $hdr->{'Status'};
   my $uri = URI->new($work_url);
+    
+  if ($status != 200) {
+    AE::log error => "Failed to load page: %s", $uri->as_iri;
+    AE::log error => " Status: %d Reason: %s", $status, $hdr->{'Reason'};
+    $PROGRESS{$data->{'url_original'}} = 1;
+    return;
+  }
+  
+  if ($hdr->{'content-disposition'} eq 'attachment') {
+    AE::log error => "Invalid content type: %s", $uri->as_iri;
+    $PROGRESS{$data->{'url_original'}} = 1;
+    return;
+  }
   
   $data->{'url_work'} = $work_url;
   
   my $root = HTML::TreeBuilder->new_from_content($body);
-  my $title = $root->look_down
+  my $product_title = $root->look_down
   (
     _tag	=> "div",
     class	=> "product-title",
-  )
-  ->look_down(_tag => "h1");
+  );
+  
+  if (not defined $product_title) {
+    AE::log error => Dumper $hdr;
+    $PROGRESS{$data->{'url_original'}} = 1;
+    return;
+  }
+  
+  my $title = $product_title->look_down(_tag => "h1");
   
   if (not defined $title) {
     AE::log error => "Failed to find title: %s", $uri->as_iri;
-    $data->{'error'} = "Failed to find title";
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
@@ -145,30 +167,43 @@ sub process_response {
   my $link_details = $root->look_down
   (
     _tag	=> "a",
-    class	=> "mscom-link mscom-accordion-item-link"
+    'bi:cmpnm'	=> 'Details',
+  );
+  
+  my $link_required = $root->look_down
+  (
+    _tag	=> "a",
+    'bi:cmpnm'	=> 'System Requirements',
   );
   
   if (not defined $link_download) {
     AE::log error => "Failed to find download link: %s", $uri->as_iri;
-    $data->{'error'} = "Failed to find download link";
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
   
   if (not defined $link_details) {
     AE::log error => "Failed to find details link: %s", $uri->as_iri;
-    $data->{'error'} = "Failed to find details link";
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
   
-  my $uri_dl = URI->new_abs($link_download->attr('href'), $uri);
-  my $uri_nfo = URI->new_abs($link_details->attr('href'), $uri);
-
-  $data->{'url_dl'} = $uri_dl->as_string;
-  $data->{'url_nfo'} = $uri_nfo->as_string;
+  if (not defined $link_required) {
+    AE::log error => "Failed to find supported os: %s", $uri->as_iri;
+    $PROGRESS{$data->{'url_original'}} = 1;
+    return;
+  }
   
-  http_get $uri_nfo->as_string, sub {
+  my $uri_dl = URI->new_abs( $link_download->attr('href'), $uri );
+  my $uri_nfo = URI->new_abs( $link_details->attr('href'), $uri );
+  my $uri_req = URI->new_abs( $link_required->attr('href'), $uri );
+
+  $data->{'url_dl'} = $uri_dl->as_string();
+  $data->{'url_nfo'} = $uri_nfo->as_string();
+  $data->{'url_req'} = $uri_req->as_string();
+  
+  
+  http_get $data->{'url_nfo'}, sub {
     my ($body, $hdr) = @_;
     
     my $root = HTML::TreeBuilder->new_from_content($body);
@@ -180,7 +215,6 @@ sub process_response {
     
     if (not defined $item) {
       AE::log error => "Failed to find file info: %s", $uri->as_iri;
-      $data->{'error'} = "Failed to find file info";
       $PROGRESS{$data->{'url_original'}} = 1;
       return;
     }
@@ -225,50 +259,61 @@ sub process_response {
       class	=> "kb-sb",
     );
     
-    if (not defined $kb_sb) {
-      AE::log error => "Failed to find security bulletin: %s", $uri->as_iri;
-      $data->{'error'} = "Failed to find security bulletin";
-      $PROGRESS{$data->{'url_original'}} = 1;
-      return;
-    }
+    if (defined $kb_sb) {
+      my @items = $kb_sb->content_list;
     
-    my @items = $kb_sb->content_list;
+      $data->{'kb-sb'} = \my @kb_sb;
     
-    $data->{'kb-sb'} = \my @kb_sb;
-    
-    for my $item (@items) {
-      next if ($item->is_empty());
-      
-      if (my $url = $item->look_down(_tag => 'a')) {
-        #AE::log debug => "+ %s [%s]", $item->as_text, $url->attr('href');
-        push @kb_sb, [$item->as_text(), $url->attr('href')];
-      } else {
-        #AE::log debug => "+ %s", $item->as_text;
-        push @kb_sb, [$item->as_text()];
-      }
-    }
-    
-    http_get $uri_dl->as_string(), sub {
-      my ($body, $hdr) = @_;
-    
-      my $root = HTML::TreeBuilder->new_from_content($body);
-      my $table = $root->look_down(_tag	=> 'table');      
-      my @items = $table->content_list;
-      
-      $data->{'download'} = \my @urls;
-      
       for my $item (@items) {
         next if ($item->is_empty());
-        
+      
         if (my $url = $item->look_down(_tag => 'a')) {
-          push @urls, $url->attr('href');
+          push @kb_sb, [$item->as_text(), $url->attr('href')];
+        } else {
+          push @kb_sb, [$item->as_text()];
         }
       }
+    } else {
+      AE::log warn => "Failed to find security bulletin: %s", $uri->as_iri;    
+    }
+    
+    http_get $data->{'url_req'}, sub {
+      my ($body, $hdr) = @_;
+      
+      my $root = HTML::TreeBuilder->new_from_content($body);
+      my $info = $root->look_down
+      (
+        _tag		=> "p",
+        itemprop	=> "operatingSystem",
+      );
+      
+      if (defined $info) {
+        $data->{'required'} = $info->as_text();
+      } else {
+        AE::log warn => "Failed to find requirements: %s", $uri->as_iri;
+      }
+
+      http_get $data->{'url_dl'}, sub {
+        my ($body, $hdr) = @_;
+    
+        my $root = HTML::TreeBuilder->new_from_content($body);
+        my $table = $root->look_down(_tag	=> 'table');
+        my @items = $table->content_list;
+      
+        $data->{'download'} = \my @urls;
+      
+        for my $item (@items) {
+          next if ($item->is_empty());
+        
+          if (my $url = $item->look_down(_tag => 'a')) {
+            push @urls, $url->attr('href');
+          }
+        }
             
-      &store_data($data);
-      #AE::log debug => Dumper $data;
-      $PROGRESS{$data->{'url_original'}} = 1;
-    };
+        &store_data($data);
+        $PROGRESS{$data->{'url_original'}} = 1;
+      }; # download
+    }; # requirements
   };
 }
 
@@ -294,11 +339,19 @@ sub store_data($) {
     printf FILE "Version: %s\n", $data->{'file_version'};
     printf FILE "Date: %s\n", $data->{'date_publish'};
     printf FILE "Download: %s\n", $data->{'download'}[$i];
+    
+    if (exists $data->{'required'}) {
+      $data->{'required'} =~ s/^\s+//;
+      $data->{'required'} =~ s/\s+$//;
+      printf FILE "Requirements: %s\n", $data->{'required'};
+    }
   
-    printf FILE "References:\n";
-    for my $info (@{ $data->{'kb-sb'} }) {
-      next if (@$info != 2);
-      printf FILE " %s\n", $info->[1];
+    if (exists $data->{'kb-sb'}) {
+      printf FILE "References:\n";
+      for my $info (@{ $data->{'kb-sb'} }) {
+        next if (@$info != 2);
+        printf FILE " %s\n", $info->[1];
+      }
     }
   
     close FILE

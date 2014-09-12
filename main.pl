@@ -13,7 +13,7 @@ use Cwd ();
 use File::Spec::Functions ();
 use Getopt::Long qw/:config no_ignore_case bundling/;
 
-$PROGRAM_NAME = "pwud.pl"; $VERSION  = '0.02';
+$PROGRAM_NAME = "pwud.pl"; $VERSION  = '0.03';
 
 my $retval = GetOptions
 ( 

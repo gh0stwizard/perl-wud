@@ -17,9 +17,10 @@ use File::Spec::Functions ();
 use Getopt::Long qw/:config no_ignore_case bundling/;
 use File::Find ();
 use Carp qw/croak/;
+use Encode ();
 
 
-$PROGRAM_NAME = "meta2bat.pl"; $VERSION  = '0.01';
+$PROGRAM_NAME = "meta2bat.pl"; $VERSION  = '0.02';
 
 my $retval = GetOptions
 ( 
@@ -100,7 +101,7 @@ sub process($$$$$) {
   my $fh;
   
   if (defined $output) {  
-    open $fh, ">", $output
+    open $fh, ">:encoding(UTF-8)", $output
       or croak sprintf("open %s: %s", $output, $!);
   } else {
     open $fh, ">&STDOUT"
@@ -111,27 +112,42 @@ sub process($$$$$) {
   
   print $fh '@echo off';
   print $fh 'setlocal';
-  print $fh 'PATHTOFIXES=C:\Updates';
+  print $fh 'SET PATHTOFIXES=C:\Updates';
   print $fh '';
   
   if ($ostype eq 'winxp') {
     for (my $i = 0; $i < $total; $i++) {
       my $filename = $files[$i];
+      my $title = $data{$filename}->[1];
+      my $url = $data{$filename}->[2];
       
-      printf $fh "; %s\r\n", $data{$filename}->[1]; # add title
-      printf $fh "; %s\r\n", $data{$filename}->[2]; # add url
-      printf $fh "%%PATHTOFIXES%%\\%s /q /u /n /z\r\n", $filename;
+      printf $fh "REM %s\r\n", &Encode::decode_utf8($title); # add title
+      printf $fh "REM %s\r\n", $url; # add url
+      printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n", $filename;
       print $fh '';
     }
   } elsif ($ostype eq 'win7') {
-    # TODO
-    ...    
+    for (my $i = 0; $i < $total; $i++) {
+      my $filename = $files[$i];
+      my $title = $data{$filename}->[1];
+      my $url = $data{$filename}->[2];
+      
+      printf $fh "REM %s\r\n", &Encode::decode_utf8($title); # add title
+      printf $fh "REM %s\r\n", $url; # add url
+      printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n", $filename;
+      print $fh '';
+    }
   } else {
     local $\ = "\n";
     print STDERR "Invalid value for options --os-type";
     close $fh;
     exit 1;
   }
+  
+  print $fh 'SET Choice=';
+  print $fh 'SET /P Choice=Press any key to continue ...';
+  print $fh 'GOTO End';
+  print $fh ':End';
   
   close $fh or croak sprintf("close %s: %s", $output, $!);
 }
