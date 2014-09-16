@@ -19,13 +19,15 @@ use Carp ();
 use URI ();
 use File::Spec::Functions ();
 
-use Data::Dumper;
-
 # Global variables
 my $PIDFILE = $ENV{'PIDFILE'};
 my $INPUT_FILE = $ENV{'FILE'};
 my $DL_PATH = $ENV{'DL_PATH'};
 my $DNS = $ENV{'DNS_SERVERS'};
+my $DRY_RUN = $ENV{'DRY_RUN'};
+# AnyEvent::HTTP settings
+my $HTTP_MAX_RECURSE = $ENV{'HTTP_MAX_RECURSE'} 	|| 10;
+my $HTTP_MAX_PER_HOST = $ENV{'HTTP_MAX_PER_HOST'} 	|| 4;
 
 my @URL_LIST;
 my %PROGRESS;
@@ -68,8 +70,12 @@ sub check_filelist() {
 sub download_all() {
   &import_urls();
   &setup_dns();
+
+
+  # tune AnyEvent::HTTP  
+  $AnyEvent::HTTP::MAX_RECURSE = $HTTP_MAX_RECURSE;
+  $AnyEvent::HTTP::MAX_PER_HOST = $HTTP_MAX_PER_HOST;
   
-  $AnyEvent::HTTP::MAX_RECURSE = 30;
   
   for (my $i = 0; $i < @URL_LIST; $i++) {
     my $url = $URL_LIST[$i];
@@ -82,7 +88,9 @@ sub download_all() {
     for my $state (values %PROGRESS) {
       return if $state == 0;
     }
-    
+   
+    # finished all jobs, exiting
+    # anyevent::dns keeps loop running forever :\
     undef $w_progress;
     EV::unloop;
   };
@@ -100,7 +108,8 @@ sub setup_dns() {
   }
 
   $AnyEvent::DNS::RESOLVER = new AnyEvent::DNS
-    #FIXME: bug in ae:dns with multiple nameservers causes false-positive errors
+    # FIXME
+    # bug in ae:dns with multiple nameservers causes false-positive errors
     server          => \@dns,
     timeout         => [1, 3, 5],
     max_outstanding => 500,
@@ -117,14 +126,16 @@ sub process_response {
   my $uri = URI->new($work_url);
     
   if ($status != 200) {
-    AE::log error => "Failed to load page: %s", $uri->as_iri;
+    AE::log error => "Failed to load page:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     AE::log error => " Status: %d Reason: %s", $status, $hdr->{'Reason'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
   
   if ($hdr->{'content-disposition'} eq 'attachment') {
-    AE::log error => "Invalid content type: %s", $uri->as_iri;
+    AE::log error => "Invalid content type:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
@@ -139,7 +150,8 @@ sub process_response {
   );
   
   if (not defined $product_title) {
-    AE::log error => Dumper $hdr;
+    AE::log error => "Unable to parse content:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
@@ -147,7 +159,8 @@ sub process_response {
   my $title = $product_title->look_down(_tag => "h1");
   
   if (not defined $title) {
-    AE::log error => "Failed to find title: %s", $uri->as_iri;
+    AE::log error => "Failed to find title:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
@@ -177,19 +190,22 @@ sub process_response {
   );
   
   if (not defined $link_download) {
-    AE::log error => "Failed to find download link: %s", $uri->as_iri;
+    AE::log error => "Failed to find download link:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
   
   if (not defined $link_details) {
-    AE::log error => "Failed to find details link: %s", $uri->as_iri;
+    AE::log error => "Failed to find details link:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
   
   if (not defined $link_required) {
-    AE::log error => "Failed to find supported os: %s", $uri->as_iri;
+    AE::log error => "Failed to find supported os:\n %s\n %s",
+      $uri->as_iri(), $data->{'url_original'};
     $PROGRESS{$data->{'url_original'}} = 1;
     return;
   }
@@ -214,7 +230,8 @@ sub process_response {
     );
     
     if (not defined $item) {
-      AE::log error => "Failed to find file info: %s", $uri->as_iri;
+      AE::log error => "Failed to find file info:\n %s\n %s",
+        $uri->as_iri(), $data->{'url_original'};
       $PROGRESS{$data->{'url_original'}} = 1;
       return;
     }
@@ -274,7 +291,8 @@ sub process_response {
         }
       }
     } else {
-      AE::log warn => "Failed to find security bulletin: %s", $uri->as_iri;    
+      AE::log warn => "Failed to find security bulletin:\n %s\n %s",
+        $uri->as_iri(), $data->{'url_original'};
     }
     
     http_get $data->{'url_req'}, sub {
@@ -290,7 +308,8 @@ sub process_response {
       if (defined $info) {
         $data->{'required'} = $info->as_text();
       } else {
-        AE::log warn => "Failed to find requirements: %s", $uri->as_iri;
+        AE::log warn => "Failed to find requirements:\n %s\n %s",
+          $uri->as_iri(), $data->{'url_original'};
       }
 
       http_get $data->{'url_dl'}, sub {
@@ -309,8 +328,11 @@ sub process_response {
             push @urls, $url->attr('href');
           }
         }
-            
-        &store_data($data);
+        
+        if (not $DRY_RUN) {
+          &store_data($data);
+        }
+        
         $PROGRESS{$data->{'url_original'}} = 1;
       }; # download
     }; # requirements

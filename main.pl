@@ -13,7 +13,7 @@ use Cwd ();
 use File::Spec::Functions ();
 use Getopt::Long qw/:config no_ignore_case bundling/;
 
-$PROGRAM_NAME = "pwud.pl"; $VERSION  = '0.03';
+$PROGRAM_NAME = "pwud.pl"; $VERSION  = '0.04';
 
 my $retval = GetOptions
 ( 
@@ -22,6 +22,7 @@ my $retval = GetOptions
   'pidfile|P=s', 'home|H=s', 'fork', 'quiet',
   'logfile|L=s', 'enable-syslog', 'syslog-facility=s',
   'file|F=s', 'dst-dir|D=s', 'dns-servers|N=s',
+  'dry-run|R', 'max-recurse|r=i', 'max-per-host|p=i',
 );
 
 if (defined $retval and !$retval) {
@@ -43,23 +44,30 @@ if (exists $options{'version'}) {
 
 # use only absolute paths
 &fix_paths();
+
 # check/get pidfile filename
 $ENV{'PIDFILE'} = &get_pidfile();
+
 # program variables
 eval q{
-  my %map = (
+  my %valued = (
     'file' 		=> 'FILE',
     'dst-dir'		=> 'DL_PATH',
     'dns-servers'	=> 'DNS_SERVERS',
+    'dry-run'		=> 'DRY_RUN',
+    'max-recurse'	=> 'HTTP_MAX_RECURSE',
+    'max-per-host'	=> 'HTTP_MAX_PER_HOST',
   );
 
-  for my $name (keys %map) {
+  for my $name (keys %valued) {
     next if not defined $options{ $name };
-    $ENV{$map{$name}} = $options{ $name };
+    $ENV{ $valued{$name} } = $options{ $name };
   }
 };
+
 # Set up AnyEvent::Log environment variable.
 $ENV{'PERL_ANYEVENT_LOG'} = &ae_log_string();
+
 # for staticperl
 &patch_programname();
 # daemonize when needed
@@ -105,10 +113,20 @@ sub print_help() {
     # main options
     printf $h, "-F [--file]", "file with urls to be downloaded";
     printf $h, "", "- REQUIRED";
+    
     printf $h, "-D [--dst-dir]", "the directory where files will be stored";
     printf $h, "", "- default is \$TMP_DIR";
+    
     printf $h, "-N [--dns-servers]", "comma separated list of dns servers";
     printf $h, "", "- default is 127.0.0.1";
+    
+    printf $h, "-R [--dry-run]", "do not write anything to files";
+    
+    printf $h, "-p [--max-per-host]", "the maximum number of concurrent connections";
+    printf $h, "", "- default is 4";
+    
+    printf $h, "-r [--max-recurse]", "the maximum number of redirects";
+    printf $h, "", "- default is 10";
 
     # additional options
     printf $h, "--fork", "run process in background";
