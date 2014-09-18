@@ -5,19 +5,20 @@
 # This is free software; you can redistribute it and/or modify it
 # under the same terms as the Perl 5 programming language system itself.
 
+
+package main;
+
 use strict;
 use warnings;
-
 use common::sense;
 use EV 4.0;
 use AnyEvent;
 use AnyEvent::Socket;
 use AnyEvent::HTTP;
 use Time::HiRes qw/gettimeofday tv_interval/;
-use HTML::TreeBuilder 5 -weak;
 use Carp ();
-use URI ();
 use File::Spec::Functions ();
+
 
 # Global variables
 my $PIDFILE = $ENV{'PIDFILE'};
@@ -81,6 +82,7 @@ sub download_all() {
     my $url = $URL_LIST[$i];
     my %data = ( url_original => $url );
     $PROGRESS{$url} = 0;
+    
     http_get $url, sub { &process_response(@_, \%data) };
   }
   
@@ -116,228 +118,154 @@ sub setup_dns() {
     reuse           => 1,
     untaint         => 0,
   ;
+  
+  return;
 }
 
 sub process_response {
   my ($body, $hdr, $data) = @_;
   
-  my $work_url = $hdr->{'URL'};
   my $status = $hdr->{'Status'};
-  my $uri = URI->new($work_url);
+  my $url_cur = $hdr->{'URL'};
+  my $url_ori = $data->{'url_original'};
+  
+  $PROGRESS{$url_ori} = 1;
     
   if ($status != 200) {
     AE::log error => "Failed to load page:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    AE::log error => " Status: %d Reason: %s", $status, $hdr->{'Reason'};
-    $PROGRESS{$data->{'url_original'}} = 1;
+      $url_cur, $url_ori;
+    AE::log error => " Status: %d Reason: %s",
+      $status, $hdr->{'Reason'};
     return;
   }
   
   if ($hdr->{'content-disposition'} eq 'attachment') {
     AE::log error => "Invalid content type:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    $PROGRESS{$data->{'url_original'}} = 1;
+      $url_cur, $url_ori;
     return;
   }
   
-  $data->{'url_work'} = $work_url;
+  my $pwud = new PWUD::Main
+    body 		=> \$body,
+    url_original 	=> $url_ori,
+    url_current 	=> $url_cur,
+  ;
   
-  my $root = HTML::TreeBuilder->new_from_content($body);
-  my $product_title = $root->look_down
-  (
-    _tag	=> "div",
-    class	=> "product-title",
-  );
+  $data->{'title'} = $pwud->get_title() or return;  
+  $data->{'url_dl'} = $pwud->get_link_download() or return;
+  $data->{'url_nfo'} = $pwud->get_link_details() or return;
+  $data->{'url_req'} = $pwud->get_link_require() or return;
   
-  if (not defined $product_title) {
-    AE::log error => "Unable to parse content:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    $PROGRESS{$data->{'url_original'}} = 1;
-    return;
-  }
+  $PROGRESS{$url_ori} = 0;
   
-  my $title = $product_title->look_down(_tag => "h1");
-  
-  if (not defined $title) {
-    AE::log error => "Failed to find title:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    $PROGRESS{$data->{'url_original'}} = 1;
-    return;
-  }
-  
-  $title = $title->as_text();
-  $title =~ s/^\s+//;
-  $title =~ s/\s+$//;
-  
-  $data->{'title'} = $title;
-  
-  my $link_download = $root->look_down
-  (
-    _tag 	=> "a",
-    class 	=> "mscom-link download-button dl",
-  );
-  
-  my $link_details = $root->look_down
-  (
-    _tag	=> "a",
-    'bi:cmpnm'	=> 'Details',
-  );
-  
-  my $link_required = $root->look_down
-  (
-    _tag	=> "a",
-    'bi:cmpnm'	=> 'System Requirements',
-  );
-  
-  if (not defined $link_download) {
-    AE::log error => "Failed to find download link:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    $PROGRESS{$data->{'url_original'}} = 1;
-    return;
-  }
-  
-  if (not defined $link_details) {
-    AE::log error => "Failed to find details link:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    $PROGRESS{$data->{'url_original'}} = 1;
-    return;
-  }
-  
-  if (not defined $link_required) {
-    AE::log error => "Failed to find supported os:\n %s\n %s",
-      $uri->as_iri(), $data->{'url_original'};
-    $PROGRESS{$data->{'url_original'}} = 1;
-    return;
-  }
-  
-  my $uri_dl = URI->new_abs( $link_download->attr('href'), $uri );
-  my $uri_nfo = URI->new_abs( $link_details->attr('href'), $uri );
-  my $uri_req = URI->new_abs( $link_required->attr('href'), $uri );
-
-  $data->{'url_dl'} = $uri_dl->as_string();
-  $data->{'url_nfo'} = $uri_nfo->as_string();
-  $data->{'url_req'} = $uri_req->as_string();
-  
-  
+  # file inforamtion page
   http_get $data->{'url_nfo'}, sub {
     my ($body, $hdr) = @_;
     
-    my $root = HTML::TreeBuilder->new_from_content($body);
-    my $item = $root->look_down
-    (
-      _tag	=> "div",
-      class	=> "fileinfo",
-    );
+    my $status = $hdr->{'Status'};
+    my $url_cur = $hdr->{'URL'};
+    my $url_ori = $data->{'url_original'};
+  
+    $PROGRESS{$url_ori} = 1;
     
-    if (not defined $item) {
-      AE::log error => "Failed to find file info:\n %s\n %s",
-        $uri->as_iri(), $data->{'url_original'};
-      $PROGRESS{$data->{'url_original'}} = 1;
+    if ($status != 200) {
+      AE::log error => "Failed to load page:\n %s\n %s",
+        $url_cur, $url_ori;
+      AE::log error => " Status: %d Reason: %s",
+        $status, $hdr->{'Reason'};
       return;
     }
     
-    my $version = $item->look_down
-    (
-      _tag	=> "div",
-      class	=> "header",
-    );
+    my $pwud = new PWUD::Details
+      body 		=> \$body,
+      url_original 	=> $url_ori,
+      url_current 	=> $url_cur,
+    ;
+
+    $data->{'file_version'} = $pwud->get_version() or return;
+    $data->{'date_publish'} = $pwud->get_publish() or return;
+    my ($files, $sizes) = $pwud->get_files() or return;
+    $data->{'file_name'} = $files;
+    $data->{'file_size'} = $sizes;
     
-    my ($filename, $filesize) = $item->look_down
-    (
-      _tag	=> "div",
-      class	=> "file-header",
-    );
-    
-    my $publish = $item->look_down
-    (
-      _tag	=> "div",
-      class	=> "header date-published",
-    );
-    
-    $data->{'file_version'} = $version->right->as_text();
-    $data->{'date_publish'} = $publish->right->as_text();
-    
-    $data->{'file_name'} = \my @names;
-    my @name_nodes = $filename->right->content_list();
-    
-    for (@name_nodes) {
-      my $name = $_->as_text();
-      $name =~ s/\\/\-/g;
-      push @names, $name;
-    }
-    
-    $data->{'file_size'} = \my @sizes;
-    my @size_nodes = $filesize->right->content_list;
-    push @sizes, $_->as_text for @size_nodes;
-            
-    my $kb_sb = $root->look_down
-    (
-      _tag	=> "div",
-      class	=> "kb-sb",
-    );
-    
-    if (defined $kb_sb) {
-      my @items = $kb_sb->content_list;
-    
-      $data->{'kb-sb'} = \my @kb_sb;
-    
-      for my $item (@items) {
-        next if ($item->is_empty());
-      
-        if (my $url = $item->look_down(_tag => 'a')) {
-          push @kb_sb, [$item->as_text(), $url->attr('href')];
-        } else {
-          push @kb_sb, [$item->as_text()];
-        }
-      }
+    if (my $kb_sb = $pwud->get_bulletins()) {
+      $data->{'kb-sb'} = $kb_sb;
     } else {
       AE::log warn => "Failed to find security bulletin:\n %s\n %s",
-        $uri->as_iri(), $data->{'url_original'};
+        $hdr->{'URL'}, $data->{'url_original'};    
     }
     
+    $PROGRESS{$url_ori} = 0;
+        
+    # requirements page
     http_get $data->{'url_req'}, sub {
       my ($body, $hdr) = @_;
       
-      my $root = HTML::TreeBuilder->new_from_content($body);
-      my $info = $root->look_down
-      (
-        _tag		=> "p",
-        itemprop	=> "operatingSystem",
-      );
+      my $status = $hdr->{'Status'};
+      my $url_cur = $hdr->{'URL'};
+      my $url_ori = $data->{'url_original'};
+  
+      $PROGRESS{$url_ori} = 1;
+
+      if ($status != 200) {
+        AE::log error => "Failed to load page:\n %s\n %s",
+          $url_cur, $url_ori;
+        AE::log error => " Status: %d Reason: %s",
+          $status, $hdr->{'Reason'};
+        return;
+      }
+    
+      my $pwud = new PWUD::Require
+        body 		=> \$body,
+        url_original 	=> $url_ori,
+        url_current 	=> $url_cur,
+      ;
       
-      if (defined $info) {
-        $data->{'required'} = $info->as_text();
+      if (my $req = $pwud->get_requirements()) {
+        $data->{'required'} = $req;
       } else {
         AE::log warn => "Failed to find requirements:\n %s\n %s",
-          $uri->as_iri(), $data->{'url_original'};
+          $hdr->{'URL'}, $data->{'url_original'};      
       }
-
+      
+      $PROGRESS{$url_ori} = 0;
+      
+      # download page, extract urls
       http_get $data->{'url_dl'}, sub {
         my ($body, $hdr) = @_;
-    
-        my $root = HTML::TreeBuilder->new_from_content($body);
-        my $table = $root->look_down(_tag	=> 'table');
-        my @items = $table->content_list;
-      
-        $data->{'download'} = \my @urls;
-      
-        for my $item (@items) {
-          next if ($item->is_empty());
         
-          if (my $url = $item->look_down(_tag => 'a')) {
-            push @urls, $url->attr('href');
-          }
+        my $status = $hdr->{'Status'};
+        my $url_cur = $hdr->{'URL'};
+        my $url_ori = $data->{'url_original'};
+  
+        $PROGRESS{$url_ori} = 1;
+
+        if ($status != 200) {
+          AE::log error => "Failed to load page:\n %s\n %s",
+            $url_cur, $url_ori;
+          AE::log error => " Status: %d Reason: %s",
+            $status, $hdr->{'Reason'};
+          return;
         }
+        
+        my $pwud = new PWUD::Download
+          body 		=> \$body,
+          url_original 	=> $url_ori,
+          url_current 	=> $url_cur,
+        ;
+    
+        $data->{'download'} = $pwud->get_links() or return;
         
         if (not $DRY_RUN) {
           &store_data($data);
         }
         
-        $PROGRESS{$data->{'url_original'}} = 1;
+        return;
       }; # download
     }; # requirements
   };
 }
+
 
 sub store_data($) {
   my $data = shift;
@@ -405,3 +333,424 @@ sub import_urls() {
 # Run loop
 #
 EV::run; scalar "Dream in my fantasy";
+
+
+package PWUD;
+
+use strict;
+use warnings;
+use HTML::TreeBuilder 5 -weak;
+use AE ();
+
+
+BEGIN {
+  use Exporter ();
+    
+  our ($VERSION, @ISA, @EXPORT, @EXPORT_OK, %EXPORT_TAGS);
+  
+  $VERSION     = '1.000';
+  @ISA         = qw( Exporter );
+  @EXPORT      = ( );
+  %EXPORT_TAGS = 
+  (
+    main => [ qw
+      (
+        E_NOERROR
+        E_CONTENT
+        E_TITLE
+        E_DOWNLOAD
+        E_DETAILS
+        E_REQUIRE
+      )
+    ],
+    details => [ qw
+      (
+        E_NOERROR
+        E_FILEINFO
+        E_VERSION
+        E_PUBLISH
+        E_FILES
+      )
+    ],
+    require => [ qw
+      (
+        E_NOERROR
+      )
+    ],
+    download => [ qw
+      (
+        E_NOERROR
+        E_TABLE
+      )
+    ],
+  );
+  
+  &Exporter::export_ok_tags('main');
+  &Exporter::export_ok_tags('details');
+  &Exporter::export_ok_tags('require');
+  &Exporter::export_ok_tags('download');
+}
+
+sub new {
+  my ($class, %args) = @_;
+  
+  my $body = delete $args{'body'};
+  my $self = bless \%args, $class;
+  
+  $self->{'_root'} = HTML::TreeBuilder->new_from_content($body);
+  
+  return $self;
+}
+
+sub E_NOERROR 	{  0 }
+# mainpage
+sub E_CONTENT 	{  1 }
+sub E_TITLE 	{  2 }
+sub E_DOWNLOAD	{  3 }
+sub E_DETAILS	{  4 }
+sub E_REQUIRE	{  5 }
+# details
+sub E_FILEINFO	{  6 }
+sub E_VERSION	{  7 }
+sub E_PUBLISH	{  8 }
+sub E_FILES	{  9 }
+# require
+# ...
+# download
+sub E_TABLE	{ 10 }
+
+{
+  my @errors = 
+  (
+    "There is no error:\n %s\n %s",
+    "Unable to parse content:\n %s\n %s",
+    "Failed to find title:\n %s\n %s",
+    "Failed to find download link:\n %s\n %s",
+    "Failed to find details link:\n %s\n %s",
+    "Failed to find supported os:\n %s\n %s",
+    "Failed to find file info:\n %s\n %s",
+    "Failed to find version:\n %s\n %s",
+    "Failed to find publish date:\n %s\n %s",
+    "Failed to find filenames or filesizes:\n %s\n %s",
+    "Failed to find download table:\n %s\n %s",
+  );
+
+  sub error {
+    my ($self, $code) = @_;
+    
+    my @urls = @$self{qw(url_current url_original)};    
+    my $fstr = $errors[$code] 
+      // AE::log fatal => "Internal error:\n %s\n %s", @urls;
+      
+    AE::log error => $fstr, @urls;
+    
+    return;
+  }
+}
+
+
+package PWUD::Main;
+
+use strict;
+use warnings;
+use URI ();
+use AE ();
+
+use parent -norequire, 'PWUD';
+BEGIN { PWUD->import(':main') }
+
+
+sub get_title {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $product_title = $root->look_down
+  (
+    _tag	=> "div",
+    class	=> "product-title",
+  );
+  
+  $product_title or return $self->error( &E_CONTENT() );
+  
+  if (my $title = $product_title->look_down(_tag => "h1")) {
+    $title = $title->as_text();
+    $title =~ s/^\s+//;
+    $title =~ s/\s+$//;
+  
+    return $title;
+  }
+  
+  return $self->error( &E_TITLE() );
+}
+
+
+sub get_link_download {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $link = $root->look_down
+  (
+    _tag 	=> "a",
+    class 	=> "mscom-link download-button dl",
+  );
+  
+  if (defined $link) {
+    my $cur = URI->new( $self->{'url_current'} );
+    my $uri = URI->new_abs( $link->attr('href'), $cur );
+    my $url = $uri->as_string();
+    return $url;
+  }
+  
+  return $self->error( &E_DOWNLOAD() );
+}
+
+
+sub get_link_details {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $link = $root->look_down
+  (
+    _tag	=> "a",
+    'bi:cmpnm'	=> 'Details',
+  );
+  
+  if (defined $link) {
+    my $cur = URI->new( $self->{'url_current'} );
+    my $uri = URI->new_abs( $link->attr('href'), $cur );
+    my $url = $uri->as_string();
+    return $url;
+  }
+  
+  return $self->error( &E_DETAILS() );
+}
+
+
+sub get_link_require {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $link = $root->look_down
+  (
+    _tag	=> "a",
+    'bi:cmpnm'	=> 'System Requirements',
+  );
+  
+  if (defined $link) {
+    my $cur = URI->new( $self->{'url_current'} );
+    my $uri = URI->new_abs( $link->attr('href'), $cur );
+    my $url = $uri->as_string();
+    return $url;
+  }
+  
+  return $self->error( &E_REQUIRE() );
+}
+
+
+package PWUD::Details;
+
+use strict;
+use warnings;
+use URI ();
+use AE ();
+
+use parent -norequire, 'PWUD';
+BEGIN { PWUD->import(':details') }
+
+
+sub get_version {
+  my ($self) = @_;
+    
+  if (not exists $self->{'_fileinfo'}) {
+    $self->_fileinfo() or return;
+  }
+  
+  my $block = $self->{'_fileinfo'};
+  my $item = $block->look_down
+  (
+    _tag	=> "div",
+    class	=> "header",
+  );
+  
+  if (defined $item) {    
+    return $item->right()->as_text();
+  }
+  
+  return $self->error( &E_VERSION() );
+}
+
+
+sub get_files {
+  my ($self) = @_;
+    
+  if (not exists $self->{'_fileinfo'}) {
+    $self->_fileinfo() or return;
+  }
+  
+  my $block = $self->{'_fileinfo'};
+  my ($filename, $filesize) = $block->look_down
+  (
+    _tag	=> "div",
+    class	=> "file-header",
+  );
+  
+  if (defined $filename and defined $filesize) {  
+    # fill filenames for all listed files
+    my @names;
+    my @name_nodes = $filename->right()->content_list();
+    
+    for (@name_nodes) {
+      my $name = $_->as_text();
+      $name =~ s/\\/\-/g;
+      push @names, $name;
+      }
+    
+      # fill filesize for each file
+      my @sizes;
+      my @size_nodes = $filesize->right()->content_list();
+      push @sizes, $_->as_text() for @size_nodes;
+  
+      return \@names, \@sizes;
+  }
+  
+  return $self->error( &E_FILES() );
+}
+
+
+sub get_publish {
+  my ($self) = @_;
+    
+  if (not exists $self->{'_fileinfo'}) {
+    $self->_fileinfo() or return;
+  }
+  
+  my $block = $self->{'_fileinfo'};
+  my $item = $block->look_down
+  (
+    _tag	=> "div",
+    class	=> "header date-published",
+  );
+  
+  if (defined $item) {
+    return $item->right()->as_text();
+  }
+  
+  return $self->error( &E_PUBLISH() );
+}
+
+
+sub get_bulletins {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $kb_sb = $root->look_down
+  (
+    _tag	=> "div",
+    class	=> "kb-sb",
+  );
+    
+  if (defined $kb_sb) {
+    my @items = $kb_sb->content_list;
+    my @list;
+    
+    for my $item (@items) {
+      next if ($item->is_empty());
+      
+      if (my $url = $item->look_down(_tag => 'a')) {
+        push @list, [ $item->as_text(), $url->attr('href') ];
+      } else {
+        push @list, [ $item->as_text() ];
+      }
+    }
+    
+    return \@list;
+  }
+  
+  return;
+}
+
+
+sub _fileinfo {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};  
+  my $block = $root->look_down
+  (
+    _tag	=> "div",
+    class	=> "fileinfo",
+  );
+  
+  if (defined $block) {
+    $self->{'_fileinfo'} = $block;
+    return $self;
+  }
+  
+  return $self->error( &E_FILEINFO() );
+}
+
+
+package PWUD::Require;
+
+use strict;
+use warnings;
+use URI ();
+use AE ();
+
+use parent -norequire, 'PWUD';
+BEGIN { PWUD->import(':require') }
+
+
+sub get_requirements {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $item = $root->look_down
+  (
+    _tag	=> "p",
+    itemprop	=> "operatingSystem",
+  );
+  
+  if (defined $item) {
+    return $item->as_text();
+  }
+  
+  return;
+}
+
+
+package PWUD::Download;
+
+use strict;
+use warnings;
+use URI ();
+use AE ();
+
+use parent -norequire, 'PWUD';
+BEGIN { PWUD->import(':require') }
+
+
+sub get_links {
+  my ($self) = @_;
+  
+  my $root = $self->{'_root'};
+  my $table = $root->look_down( _tag => 'table' );
+  
+  if (defined $table) {
+    my @items = $table->content_list();
+    my @urls;
+      
+    for my $item (@items) {
+      next if ($item->is_empty());
+      
+      if (my $url = $item->look_down(_tag => 'a')) {
+        push @urls, $url->attr('href');
+      }
+    }
+    
+    return \@urls;
+  }
+
+  return $self->error( &E_TABLE() );
+}
+
+scalar "Silence";

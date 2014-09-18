@@ -81,31 +81,64 @@ sub process($$$$$) {
     my $info = &parse_file( $File::Find::name );
     
     my $filename = $info->[&FILENAME()];
+    my $arch = '';
     $filename =~ /(x86|ia64|x64)/i;
-    my $arch = lc "$1";
     
-    return if $arch ne $osarch;
+    if (defined $1) {
+      $arch = lc "$1";
+    } else {
+      if ($filename =~ /\.dmg$/) {
+        $arch = 'macos';
+      } elsif ($filename =~ /\.exe$/) {
+        $arch = 'x86';
+      } else {
+        printf STDERR "??? arch: %s\n %s\n",
+          $filename, $File::Find::name;
+      }
+    }
     
     for my $ex (split /\,/, $exclude) {
       $filename =~ m/\Q$ex\E/i and return;
     }
     
-    my ($mday, $mon, $year) = split /\./, $info->[&DATE()];
+    my $date = $info->[&DATE()];
+    my ($mday, $mon, $year);
+    
+    if ($date =~ /\d{1,2}\.\d{1,2}\.\d{4}/) {
+      ($mday, $mon, $year) = split /\./, $date;
+    } elsif ($date =~ /\d{1,2}\/\d{1,2}\/\d{4}/) {
+      ($mday, $mon, $year) = split /\//, $date;
+    } else {
+      printf STDERR "??? date: %s\n %s\n",
+        $date, $File::Find::name;
+      $mday = 31;
+      $mon = 12;
+      $year = 1999;
+    }
+    
     my $time = &POSIX::mktime(0, 0, 0, $mday, $mon - 1, $year - 1900);
     
-    $data{$filename} = [ $time, $info->[&TITLE()], $info->[&ADDRESS()] ];
+    if ($arch eq $osarch) {
+      $data{$filename} = [ $time, $info->[&TITLE()], $info->[&ADDRESS()] ];
+    }
   }}, $workdir);
   
   my @files = sort { $data{$a}->[0] <=> $data{$b}->[0] } keys %data;
   my $total = @files;
   my $fh;
   
-  if (defined $output) {  
+  if ($total == 0) {
+    print STDERR "No meta files found\n";
+    exit 1;
+  }
+  
+  if (defined $output) {
     open $fh, ">:encoding(UTF-8)", $output
       or croak sprintf("open %s: %s", $output, $!);
   } else {
     open $fh, ">&STDOUT"
       or croak "dup STDOUT: $!";
+    binmode $fh, ":utf8";
   }
   
   local $\ = "\r\n";
@@ -115,26 +148,25 @@ sub process($$$$$) {
   print $fh 'SET PATHTOFIXES=C:\Updates';
   print $fh '';
   
-  if ($ostype eq 'winxp') {
+  if (defined $ostype) {
     for (my $i = 0; $i < $total; $i++) {
       my $filename = $files[$i];
-      my $title = $data{$filename}->[1];
-      my $url = $data{$filename}->[2];
+      my ($time, $title, $url) = @{ $data{$filename} };
       
-      printf $fh "REM %s\r\n", &Encode::decode_utf8($title); # add title
-      printf $fh "REM %s\r\n", $url; # add url
-      printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n", $filename;
-      print $fh '';
-    }
-  } elsif ($ostype eq 'win7') {
-    for (my $i = 0; $i < $total; $i++) {
-      my $filename = $files[$i];
-      my $title = $data{$filename}->[1];
-      my $url = $data{$filename}->[2];
+      printf $fh "REM %s\r\n", &POSIX::strftime("%d.%m.%Y", localtime($time));
+      printf $fh "REM %s\r\n", &Encode::decode_utf8($title);
+      printf $fh "REM %s\r\n", $url;
       
-      printf $fh "REM %s\r\n", &Encode::decode_utf8($title); # add title
-      printf $fh "REM %s\r\n", $url; # add url
-      printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n", $filename;
+      if ($filename =~ /\-KB\d+\-/) {
+        printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n",
+          $filename;
+      } else {
+        printf $fh "START /W %%PATHTOFIXES%%\\%s /Q\r\n",
+          $filename;
+        printf STDERR "*** %s: use '/Q' key only (non-Update.exe file)\n",
+          $filename;
+      }
+      
       print $fh '';
     }
   } else {
@@ -190,7 +222,7 @@ sub print_help() {
     printf $h, "", "- default is current directory";
     
     printf $h, "-O [--output]", "path to bat file";
-    printf $h, "", "- default is apply-updates.bat";
+    printf $h, "", "- default is stdout";
     
     printf $h, "-t [--os-type]", "OS type";
     printf $h, "", "- supported types: winxp (default), win7";
@@ -199,5 +231,5 @@ sub print_help() {
     printf $h, "", "- supported architectures: x86 (default), x64";
     
     printf $h, "-E [--exclude]", "comma-separated list to exclude";
-    printf $h, "- for an example, exclude IE7, IE8 updates: -E IE7,IE8";
+    printf $h, "", "- for an example, exclude IE7, IE8 updates: -E IE7,IE8";
 }
