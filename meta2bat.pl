@@ -20,13 +20,13 @@ use Carp qw/croak/;
 use Encode ();
 
 
-$PROGRAM_NAME = "meta2bat.pl"; $VERSION  = '0.02';
+$PROGRAM_NAME = "meta2bat.pl"; $VERSION  = '0.03';
 
 my $retval = GetOptions
 ( 
   \my %options,
   'help|h', 'version', 'dir|D=s', 'output|O=s',
-  'os-type|t=s', 'arch|a=s', 'exclude|E=s',
+  'arch|a=s', 'exclude|E=s',
 );
 
 if (defined $retval and !$retval) {
@@ -45,7 +45,7 @@ if (exists $options{'version'}) {
     exit 0;
 }
 
-&process( @options{qw(dir output os-type arch exclude)} );
+&process( @options{qw(dir output arch exclude)} );
 exit 0;
 
 
@@ -59,8 +59,8 @@ sub DATE 	{ 2 }
 sub ADDRESS 	{ 3 }
 
 
-sub process($$$$$) {
-  my ($workdir, $output, $ostype, $osarch, $exclude) = @_;
+sub process($$$$) {
+  my ($workdir, $output, $osarch, $exclude) = @_;
   
   if (defined $workdir) {
     $workdir = &Cwd::abs_path($workdir);
@@ -68,21 +68,58 @@ sub process($$$$$) {
     $workdir = &Cwd::abs_path(&Cwd::cwd());
   }
   
-  $ostype = 'winxp' if not defined $ostype;
   $osarch = 'x86' if not defined $osarch;
   $exclude = '' if not defined $exclude;
+    
+  my $fh;
+    
+  if (defined $output) {
+    open($fh, ">:encoding(UTF-8)", $output)
+      or croak sprintf("open %s: %s", $output, $!);
+  } else {
+    open($fh, ">&STDOUT") or croak "dup STDOUT: $!";
+    binmode($fh, ":utf8");
+  }
   
+  my $data = &collect_data($workdir, $osarch, $exclude);
+  my @files = sort { $data->{$a}[0] <=> $data->{$b}[0] } keys %$data;
+  my $total = @files;
+    
+  if ($total == 0) {
+    print STDERR "No meta files found\n";
+    exit 1;
+  }
+    
+  &print_header($fh);
+    
+  for (my $i = 0; $i < $total; $i++) {
+    &print_command($fh, $files[$i], $data);
+  }
+    
+  local $\ = "\r\n";
+  
+  print $fh 'REM Cleaning up...';
+  print $fh 'call :remove_tmp_dirs';
+  print $fh '';
+  print $fh 'REM :start';
+  print $fh 'exit /b';
+  
+  close($fh) or croak sprintf("close %s: %s", $output, $!);
+}
+
+sub collect_data($$$) {
+  my ($workdir, $osarch, $exclude) = @_;
+
   my %data;
 
   &File::Find::find({ 'wanted' => sub {
     return if (not m/\.meta$/);
-    return if $File::Find::name eq $File::Find::dir;
+    return if ($File::Find::name eq $File::Find::dir);
   
     my $info = &parse_file( $File::Find::name );
-    
-    my $filename = $info->[&FILENAME()];
     my $arch = '';
-    $filename =~ /(x86|ia64|x64)/i;
+    
+    (my $filename = $info->[&FILENAME()]) =~ /(x86|ia64|x64)/i;
     
     if (defined $1) {
       $arch = lc "$1";
@@ -97,91 +134,114 @@ sub process($$$$$) {
       }
     }
     
-    for my $ex (split /\,/, $exclude) {
-      $filename =~ m/\Q$ex\E/i and return;
+    for my $key (split /\,/, $exclude) {
+      $filename =~ m/\Q$key\E/i and return;
     }
     
-    my $date = $info->[&DATE()];
-    my ($mday, $mon, $year);
+    my $date = $info->[ &DATE() ];
+    my ($mday, $mon, $year) = (31, 12, 1999);
     
-    if ($date =~ /\d{1,2}\.\d{1,2}\.\d{4}/) {
+    if ($date =~ m/\d{1,2}\.\d{1,2}\.\d{4}/) {
       ($mday, $mon, $year) = split /\./, $date;
-    } elsif ($date =~ /\d{1,2}\/\d{1,2}\/\d{4}/) {
+    } elsif ($date =~ m/\d{1,2}\/\d{1,2}\/\d{4}/) {
       ($mday, $mon, $year) = split /\//, $date;
     } else {
       printf STDERR "??? date: %s\n %s\n",
         $date, $File::Find::name;
-      $mday = 31;
-      $mon = 12;
-      $year = 1999;
     }
-    
-    my $time = &POSIX::mktime(0, 0, 0, $mday, $mon - 1, $year - 1900);
     
     if ($arch eq $osarch) {
-      $data{$filename} = [ $time, $info->[&TITLE()], $info->[&ADDRESS()] ];
+      $data{$filename} = [
+        &POSIX::mktime(0, 0, 0, $mday, $mon - 1, $year - 1900),
+        $info->[ &TITLE() ],
+        $info->[ &ADDRESS() ],
+      ];
     }
   }}, $workdir);
+
+  return \%data;
+}
+
+sub print_command($$\%) {
+  my ($fh, $filename, $data) = @_;
   
-  my @files = sort { $data{$a}->[0] <=> $data{$b}->[0] } keys %data;
-  my $total = @files;
-  my $fh;
-  
-  if ($total == 0) {
-    print STDERR "No meta files found\n";
-    exit 1;
+  my ($time, $title, $url) = @{ $data->{$filename} };
+      
+  $title = &Encode::decode_utf8($title);
+      
+  printf $fh "REM %s\r\n", $title;
+  printf $fh "REM %s\r\n", &POSIX::strftime("%d.%m.%Y", localtime($time));
+  printf $fh "REM %s\r\n", $url;
+  printf $fh "echo %s ...\r\n", $filename;
+      
+  if ($filename =~ m/\-KB\d+\-/) {
+    printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n\r\n",
+      $filename;
+    return 1;
   }
   
-  if (defined $output) {
-    open $fh, ">:encoding(UTF-8)", $output
-      or croak sprintf("open %s: %s", $output, $!);
+  if ($title =~ m/DirectX/) {
+    printf $fh "call :create_tmp_dir\r\n";
+    printf $fh "START /W %%PATHTOFIXES%%\\%s /Q /T:%%TEMPDIR%%\r\n",
+      $filename;
+    printf STDERR "*** %s: using '/Q /T' (DirectX-file)\n",
+      $filename;
   } else {
-    open $fh, ">&STDOUT"
-      or croak "dup STDOUT: $!";
-    binmode $fh, ":utf8";
+    printf $fh "START /W %%PATHTOFIXES%%\\%s /Q\r\n",
+      $filename;
+    printf STDERR "*** %s: using '/Q' key (non-Update.exe file)\n",
+      $filename;
   }
   
+  print $fh '';
+}
+
+sub print_header($) {
+  my ($fh) = @_;
+  
+  (my $quote = <<'EOF') =~ s/\n/\r\n/gm;
+@echo off
+setlocal
+SET PATHTOFIXES=C:\Updates
+SET TEMPDIR_BASEPATH=C:\Temp
+SET TEMPDIR=C:\Temp\meta2bat
+SET /A TEMPINC=0
+
+call :start
+@pause
+exit 0
+
+:create_tmp_dir
+REM Create a temporary directory
+REM Set %TEMPDIR% to current temporary directory
+set TEMPDIR=%TEMPDIR_BASEPATH%\%date:~-10%-%TEMPINC%
+set /a TEMPINC=%TEMPINC%+1
+
+IF NOT EXIST %TEMPDIR% (
+    MD %TEMPDIR%
+    exit /b
+)
+
+REM When failed exit immediatly
+echo %TEMPDIR% already exists!
+@pause
+exit 1
+
+:remove_tmp_dirs
+REM Cleanup self-created temporary directories
+@echo on
+for /l %%i in (0,1,%TEMPINC%) do RD /S /Q %TEMPDIR_BASEPATH%\%date:~-10%-%%i
+@echo off
+exit /b
+
+:start
+EOF
+
   local $\ = "\r\n";
   
-  print $fh '@echo off';
-  print $fh 'setlocal';
-  print $fh 'SET PATHTOFIXES=C:\Updates';
-  print $fh '';
-  
-  if (defined $ostype) {
-    for (my $i = 0; $i < $total; $i++) {
-      my $filename = $files[$i];
-      my ($time, $title, $url) = @{ $data{$filename} };
-      
-      printf $fh "REM %s\r\n", &POSIX::strftime("%d.%m.%Y", localtime($time));
-      printf $fh "REM %s\r\n", &Encode::decode_utf8($title);
-      printf $fh "REM %s\r\n", $url;
-      
-      if ($filename =~ /\-KB\d+\-/) {
-        printf $fh "START /W %%PATHTOFIXES%%\\%s /q /u /n /z\r\n",
-          $filename;
-      } else {
-        printf $fh "START /W %%PATHTOFIXES%%\\%s /Q\r\n",
-          $filename;
-        printf STDERR "*** %s: use '/Q' key only (non-Update.exe file)\n",
-          $filename;
-      }
-      
-      print $fh '';
-    }
-  } else {
-    local $\ = "\n";
-    print STDERR "Invalid value for options --os-type";
-    close $fh;
-    exit 1;
-  }
-  
-  print $fh 'SET Choice=';
-  print $fh 'SET /P Choice=Press any key to continue ...';
-  print $fh 'GOTO End';
-  print $fh ':End';
-  
-  close $fh or croak sprintf("close %s: %s", $output, $!);
+  printf $fh "REM auto-generated by meta2bat.pl at %s\r\n\r\n",
+    &POSIX::strftime("%d.%m.%Y %H:%M:%S", localtime);
+  print $fh $quote;
 }
 
 sub parse_file($) {
@@ -221,13 +281,10 @@ sub print_help() {
     printf $h, "-D [--dir]", "the directory where *.meta files placed";
     printf $h, "", "- default is current directory";
     
-    printf $h, "-O [--output]", "path to bat file";
+    printf $h, "-O [--output]", "path to batch file";
     printf $h, "", "- default is stdout";
     
-    printf $h, "-t [--os-type]", "OS type";
-    printf $h, "", "- supported types: winxp (default), win7";
-    
-    printf $h, "-a [--arch]", "archetecture";
+    printf $h, "-a [--arch]", "architecture";
     printf $h, "", "- supported architectures: x86 (default), x64";
     
     printf $h, "-E [--exclude]", "comma-separated list to exclude";
